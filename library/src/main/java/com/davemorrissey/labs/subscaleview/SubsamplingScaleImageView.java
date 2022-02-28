@@ -268,7 +268,6 @@ public class SubsamplingScaleImageView extends View {
     private Paint bitmapPaint;
     private Paint debugTextPaint;
     private Paint debugLinePaint;
-    private Paint tileBgPaint;
 
     // Volatile fields used to reduce object creation
     private ScaleAndTranslate satTemp;
@@ -282,6 +281,9 @@ public class SubsamplingScaleImageView extends View {
 
     // A global preference for bitmap format, available to decoder classes that respect it
     private static Bitmap.Config preferredBitmapConfig;
+
+    public Rect globalRect = new Rect();
+    private DecoratorAdapter decoratorAdapter;
 
     public SubsamplingScaleImageView(Context context, AttributeSet attr) {
         super(context, attr);
@@ -324,9 +326,6 @@ public class SubsamplingScaleImageView extends View {
             }
             if (typedAttr.hasValue(styleable.SubsamplingScaleImageView_quickScaleEnabled)) {
                 setQuickScaleEnabled(typedAttr.getBoolean(styleable.SubsamplingScaleImageView_quickScaleEnabled, true));
-            }
-            if (typedAttr.hasValue(styleable.SubsamplingScaleImageView_tileBackgroundColor)) {
-                setTileBackgroundColor(typedAttr.getColor(styleable.SubsamplingScaleImageView_tileBackgroundColor, Color.argb(0, 0, 0, 0)));
             }
             typedAttr.recycle();
         }
@@ -1028,7 +1027,6 @@ public class SubsamplingScaleImageView extends View {
         }
 
         if (tileMap != null && isBaseLayerReady()) {
-
             // Optimum sample size for current scale
             int sampleSize = Math.min(fullImageSampleSize, calculateInSampleSize(scale));
 
@@ -1044,15 +1042,29 @@ public class SubsamplingScaleImageView extends View {
                 }
             }
 
+            globalRect = null;
+            for (Map.Entry<Integer, List<Tile>> tileMapEntry : tileMap.entrySet()) {
+                if (tileMapEntry.getKey() == sampleSize || hasMissingTiles) {
+                    for (Tile tile : tileMapEntry.getValue()) {
+                        Rect tileVRect = tile.vRect;
+                        if (tileVRect.width() == 0 && tileVRect.height() == 0) {
+                            sourceToViewRect(tile.sRect, tileVRect);
+                        }
+                        if (globalRect == null) globalRect = new Rect(tileVRect);
+                        else globalRect.union(tileVRect);
+                    }
+                }
+            }
+
+            if (decoratorAdapter != null) {
+                decoratorAdapter.drawBackground(globalRect, canvas);
+            }
             // Render all loaded tiles. LinkedHashMap used for bottom up rendering - lower res tiles underneath.
             for (Map.Entry<Integer, List<Tile>> tileMapEntry : tileMap.entrySet()) {
                 if (tileMapEntry.getKey() == sampleSize || hasMissingTiles) {
                     for (Tile tile : tileMapEntry.getValue()) {
                         sourceToViewRect(tile.sRect, tile.vRect);
                         if (!tile.loading && tile.bitmap != null) {
-                            if (tileBgPaint != null) {
-                                canvas.drawRect(tile.vRect, tileBgPaint);
-                            }
                             if (matrix == null) { matrix = new Matrix(); }
                             matrix.reset();
                             setMatrixArray(srcArray, 0, 0, tile.bitmap.getWidth(), 0, tile.bitmap.getWidth(), tile.bitmap.getHeight(), 0, tile.bitmap.getHeight());
@@ -1080,8 +1092,12 @@ public class SubsamplingScaleImageView extends View {
                 }
             }
 
-        } else if (bitmap != null && !bitmap.isRecycled()) {
+			if (decoratorAdapter != null) {
+				decoratorAdapter.drawOverlay(globalRect, canvas);
+			}
 
+
+		} else if (bitmap != null && !bitmap.isRecycled()) {
             float xScale = scale, yScale = scale;
             if (bitmapIsPreview) {
                 xScale = scale * ((float)sWidth/bitmap.getWidth());
@@ -1102,14 +1118,27 @@ public class SubsamplingScaleImageView extends View {
                 matrix.postTranslate(0, scale * sWidth);
             }
 
-            if (tileBgPaint != null) {
-                if (sRect == null) { sRect = new RectF(); }
-                sRect.set(0f, 0f, bitmapIsPreview ? bitmap.getWidth() : sWidth, bitmapIsPreview ? bitmap.getHeight() : sHeight);
-                matrix.mapRect(sRect);
-                canvas.drawRect(sRect, tileBgPaint);
+			if (sRect == null) {
+				sRect = new RectF();
+				globalRect = null;
+			}
+
+            sRect.set(0f, 0f, bitmapIsPreview ? bitmap.getWidth() : sWidth, bitmapIsPreview ? bitmap.getHeight() : sHeight);
+            matrix.mapRect(sRect);
+
+			if (globalRect == null) {
+				globalRect = new Rect((int) sRect.top, (int) sRect.left, (int) sRect.right, (int) sRect.bottom);
             }
+
+			if (decoratorAdapter != null) {
+				decoratorAdapter.drawBackground(globalRect, canvas);
+			}
+
             canvas.drawBitmap(bitmap, matrix, bitmapPaint);
 
+			if (decoratorAdapter != null) {
+				decoratorAdapter.drawOverlay(globalRect, canvas);
+			}
         }
 
         if (debug) {
@@ -2038,7 +2067,7 @@ public class SubsamplingScaleImageView extends View {
         bitmapPaint = null;
         debugTextPaint = null;
         debugLinePaint = null;
-        tileBgPaint = null;
+        globalRect = null;
     }
 
     /**
@@ -2742,21 +2771,6 @@ public class SubsamplingScaleImageView extends View {
     }
 
     /**
-     * Set a solid color to render behind tiles, useful for displaying transparent PNGs.
-     * @param tileBgColor Background color for tiles.
-     */
-    public final void setTileBackgroundColor(int tileBgColor) {
-        if (Color.alpha(tileBgColor) == 0) {
-            tileBgPaint = null;
-        } else {
-            tileBgPaint = new Paint();
-            tileBgPaint.setStyle(Style.FILL);
-            tileBgPaint.setColor(tileBgColor);
-        }
-        invalidate();
-    }
-
-    /**
      * Set the scale the image will zoom in to when double tapped. This also the scale point where a double tap is interpreted
      * as a zoom out gesture - if the scale is greater than 90% of this value, a double tap zooms out. Avoid using values
      * greater than the max zoom.
@@ -3236,4 +3250,13 @@ public class SubsamplingScaleImageView extends View {
 
     }
 
+    public void setDecoratorAdapter(DecoratorAdapter decoratorAdapter) {
+        this.decoratorAdapter = decoratorAdapter;
+        invalidate();
+    }
+
+    public interface DecoratorAdapter {
+        void drawBackground(Rect rect, Canvas canvas);
+        void drawOverlay(Rect rect, Canvas canvas);
+    }
 }
